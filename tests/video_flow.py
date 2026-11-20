@@ -9,7 +9,7 @@ async def main():
             await s.initialize()
             t0 = time.time()
             res = await s.call_tool("create_video_task", {
-                "prompt": "清晨薄雾中的山谷航拍，镜头缓慢前推，阳光穿过云层，伴随轻柔风声和鸟鸣"})
+                "prompt": "清晨薄雾中的山谷航拍，镜头缓慢前推，阳光穿过云层，伴随轻柔风声和鸟鸣", "prompt_choice": "original"})
             print(res.content[0].text, "isError:", res.isError, flush=True)
             if res.isError:
                 return

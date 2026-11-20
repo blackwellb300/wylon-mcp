@@ -127,6 +127,26 @@ def save_api_key(api_key: str) -> None:
         pass
 
 
+def get_prompt_enhance() -> Optional[bool]:
+    """User preference shared with the wylon-media skill: True expand, False verbatim, None not asked yet."""
+    value = load_config().get("prompt_enhance")
+    return value if isinstance(value, bool) else None
+
+
+def set_prompt_enhance(enabled: Optional[bool]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    cfg = load_config()
+    if enabled is None:
+        cfg.pop("prompt_enhance", None)
+    else:
+        cfg["prompt_enhance"] = enabled
+    CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        pass
+
+
 def validate_base_url(base_url: str) -> str:
     url = base_url.strip().rstrip("/")
     parsed = urllib.parse.urlparse(url)
