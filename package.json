@@ -1,0 +1,26 @@
+{
+  "name": "dsh-plugin-wylon",
+  "version": "0.1.1",
+  "private": true,
+  "description": "wylon image and video generation for DeepSeek Harness",
+  "type": "module",
+  "homepage": "https://wylon.cn",
+  "exports": {
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "src/wylon_mcp/*.py",
+    "pyproject.toml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

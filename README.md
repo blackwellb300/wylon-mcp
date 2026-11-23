@@ -50,7 +50,15 @@ uvx wylon-mcp setup
 
 > **如果 AI 工具提示找不到 `uvx`**：桌面应用往往读不到终端里的 PATH。在终端运行 `which uvx`，把输出的完整路径（例如 `/Users/你/.local/bin/uvx` 或 `/opt/homebrew/bin/uvx`）填到 `"command"` 里，代替 `"uvx"`。
 
-DeepSeek Harness 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 末尾加：
+### DeepSeek Harness：作为插件安装
+
+打开 **Plugins（插件）→ Add plugin（添加插件）**，填入本仓库的 Git 地址，或本文件夹的完整路径。需要先安装 uv 和 Git（填文件夹路径时不需要 Git）。API Key 用方式 A 配置。
+
+如果以前在 `cordis.patch.yml` 里手动添加过 `serverName: wylon`，请先删掉那一段，否则两者重名，后加载的会失败。
+
+### DeepSeek Harness：手动配置
+
+不装插件也可以在 `~/.dsh/profiles/desktop/cordis.patch.yml` 末尾加：
 
 ```yaml
 - id: mcp-wylon
@@ -63,7 +71,7 @@ DeepSeek Harness 在 `~/.dsh/profiles/desktop/cordis.patch.yml` 末尾加：
     toolCallTimeoutMs: 120000
 ```
 
-DeepSeek Harness 会过滤名字里带 KEY 的环境变量，所以在这里请用方式 A 配置 Key。
+DeepSeek Harness 不会把系统里名字带 KEY 的环境变量传给 MCP。请用方式 A，或在上面的 `config` 里写明 `env: { WYLON_API_KEY: 你的Key }`（写在配置里的会保留）。
 
 添加后重启 AI 工具，然后试试：
 

@@ -1,0 +1,14 @@
+# DeepSeek Harness 插件：用 uvx 启动随插件一起安装的 wylon-mcp 源码（需要先安装 uv）。
+- insert:
+    - id: wylon-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: wylon
+        transport: stdio
+        command: uvx
+        args:
+          - '--from'
+          - !!js "process.getBuiltinModule('node:url').fileURLToPath(new URL('./node_modules/dsh-plugin-wylon', ctx.baseUrl))"
+          - 'wylon-mcp'
+        toolCallTimeoutMs: 120000
+        failOnStartupError: true

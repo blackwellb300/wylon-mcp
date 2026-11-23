@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Wylon image and video",
+    "description": "Generate images and videos with wylon.cn. Requires uv and a wylon API key; generation is billed to your wylon account."
+  }
+}

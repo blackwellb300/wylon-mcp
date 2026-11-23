@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "wylon 生图生视频",
+    "description": "用 wylon.cn 生成图片和视频。需要先安装 uv 并配置 wylon API Key，生成费用按你的 wylon 账户计费。"
+  }
+}
