@@ -8,6 +8,7 @@ import getpass
 import io
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Literal, Optional
@@ -21,17 +22,22 @@ from pydantic import Field
 from . import __version__, core
 
 INSTRUCTIONS = """\
-wylon 云端生图与生视频（https://wylon.cn）。结果会自动下载到用户本机，返回 local_path。
+wylon 云端生图、图像编辑与生视频（https://wylon.cn）。结果会自动下载到用户本机，返回 local_path。
 
 使用规则：
 - 生成会按用户的 wylon 账户计费。用户只是随口提到、不确定要不要生成时，先确认再调用。
 - 默认省钱：图片一次一张；视频默认 5 秒。要生成超过 3 张图或超过 1 条视频，先和用户确认数量。
-- 不要因为等待超时就重新提交。generate_image / create_video_task 一旦返回 task_id，说明已提交成功，
+- 不要因为等待超时就重新提交。generate_image / edit_image / create_video_task 一旦返回 task_id，说明已提交成功，
   之后只用 get_task 和同一个 task_id 继续等待或找回结果。中断后找不到 task_id 时，先调用 list_recent_tasks。
 - 视频通常需要 1~5 分钟：先 create_video_task 拿到 task_id，再反复调用 get_task（每次默认等约 25 秒）直到完成。
-- 报错里带“建议”时，按建议修正参数后再试；余额不足（402）、限流（429）、鉴权失败（401/403）不要自动重试，告诉用户。
+- 报错里带“建议”时按建议处理；余额不足、限流、鉴权或权限失败不要自动重试，告诉用户。
+- 提交时报网络错误、超时或 5xx，任务可能已经创建并计费：不要自动重新提交，按报错里的建议让用户先到控制台确认。
+- 结果生成后云端只保留 2 小时，要在这之前用 get_task 取回。
+- 用户问价格或要批量生成时，用 list_models 里的 prices 说明费用；返回的 estimated_cost 只是估算。
+- 生图和图像编辑不支持负向提示词：把“不要什么”直接写进 prompt（如“画面中没有文字”）。
+- 图片生视频且用户没说画幅时，不要传 ratio，默认跟随图片。
 - 本地参考图、首尾帧传绝对路径；参考视频只支持公网 HTTPS 链接。
-- 交付时告诉用户本地文件路径、模型、尺寸或时长、最终提示词和 task_id。云端链接是短效链接，以本地文件为准。
+- 交付时告诉用户本地文件路径、模型、实际尺寸（actual_size）或时长、最终提示词、估算费用和 task_id。云端链接是短效链接，以本地文件为准。
 - 不要在对话里索要或回显 API Key；未配置时按报错提示引导用户自行配置。
 - 提示词增强（是否把用户的简短描述扩写成完整提示词）由用户决定：用户还没选过时，生成工具会返回
   needs_user_choice 且不扣费，按返回的说明询问用户、用 set_prompt_enhance 保存后再提交。
@@ -40,6 +46,7 @@ wylon 云端生图与生视频（https://wylon.cn）。结果会自动下载到�
 
 ENHANCE_GUIDE = {
     "image": "主体 + 场景 + 风格/画风 + 光线色调 + 构图/景别；画面里要出现的文字用引号写明原文和位置，例如：画面顶部居中写着“秋季上新”。",
+    "edit": "先写保留内容（主体、外观、文字等）+ 再写具体修改（背景、光线、局部）+ 风格；多张图按顺序说明每张的用途。不要添加用户没要求的改动。",
     "video": "主体 + 动作 + 镜头运动（推、拉、摇、跟、航拍）+ 环境氛围 + 声音描述（模型会生成音效和人声，例如“伴随轻柔的雨声与远处雷鸣”）。",
 }
 
@@ -84,6 +91,10 @@ VideoModel = Literal["MiniMaxAI/MiniMax-H3", "MiniMaxAI/MiniMax-H3-Ref2VA"]
 VideoRatio = Literal["16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "adaptive"]
 
 
+KEY_TYPE_NOTE = ("这个 Key 看不到任何生图、生视频模型。如果是 Token 计划的订阅密钥，请换成普通 API 密钥；"
+                 "否则请在控制台检查账户权限。")
+
+
 def _fail(exc: core.WylonError) -> ToolError:
     return ToolError(exc.render())
 
@@ -113,7 +124,7 @@ async def _wait_for_task(ctx: Optional[Context], task_id: str, kind: Optional[st
     """Poll in short async steps so progress notifications and cancellation keep working."""
     start = time.monotonic()
     deadline = start + max(0.0, min(wait_seconds, MAX_WAIT))
-    delay = 2.0
+    delay = 5.0  # wylon recommends polling every 5-10 s
     while True:
         result = await anyio.to_thread.run_sync(core.poll_task, task_id, kind, 0, out_dir)
         remaining = deadline - time.monotonic()
@@ -127,7 +138,6 @@ async def _wait_for_task(ctx: Optional[Context], task_id: str, kind: Optional[st
             except Exception:
                 pass
         await asyncio.sleep(min(delay, remaining))
-        delay = min(delay * 1.4, 8.0)
 
 
 def _result_content(result: Dict[str, Any], preview: bool) -> List[Any]:
@@ -155,18 +165,21 @@ def list_models() -> Dict[str, Any]:
             m["available"] = None if live is None else m["id"] in live
     if live is not None and core.DEFAULT_IMAGE_MODEL not in live:
         catalog["note"] = f"默认生图模型 {core.DEFAULT_IMAGE_MODEL} 当前不可用；不传 model 时会自动改用可用的生图模型。"
+    if live is not None and not any(t in ("image", "video") for t in live.values()):
+        catalog["note"] = KEY_TYPE_NOTE
     return {
         **catalog,
         "api_key_configured": bool(api_key),
         "output_dir": str(core.output_dir(None)),
         "prompt_enhance_preference": core.get_prompt_enhance(),
+        "prices": core.price_catalog(),
     }
 
 
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(title="wylon 生图", readOnlyHint=False, destructiveHint=False,
                                       idempotentHint=False, openWorldHint=True))
 async def generate_image(
-    prompt: Annotated[str, Field(description="生图提示词。画面里要出现的文字用引号写明原文和位置。")],
+    prompt: Annotated[str, Field(description="生图提示词。画面里要出现的文字用引号写明原文和位置；不想要的内容也直接写在这里。")],
     size: Annotated[Optional[str], Field(
         description="精确分辨率，必须是所选模型支持的尺寸。Qwen-Image-2.1：2048x2048(1:1)、2752x1536(≈16:9)、"
                     "1536x2752(≈9:16)、2400x1792(4:3)、1792x2400(3:4)、2528x1696(3:2)、1696x2528(2:3)。"
@@ -174,8 +187,7 @@ async def generate_image(
     model: Annotated[Optional[ImageModel], Field(
         description="生图模型，可选。不传时用 Qwen/Qwen-Image-2.1，它不可用时自动换成在线的模型并按宽高比调整尺寸。"
                     "用户点名时才指定。")] = None,
-    negative_prompt: Annotated[Optional[str], Field(description="负向提示词，可选。")] = None,
-    seed: Annotated[Optional[int], Field(description="随机种子，可选，用于复现。", ge=0)] = None,
+    seed: Annotated[Optional[int], Field(description="随机种子，可选，用于复现。", ge=0, le=4294967295)] = None,
     output_dir: Annotated[Optional[str], Field(
         description="保存目录的绝对路径，可选。默认 ~/wylon_outputs（或环境变量 WYLON_OUTPUT_DIR）。")] = None,
     wait_seconds: Annotated[int, Field(description="本次调用最多等待秒数，超时返回 pending 和 task_id。默认 25 秒，"
@@ -197,7 +209,7 @@ async def generate_image(
         return [_text(gate)]
     try:
         payload = await anyio.to_thread.run_sync(
-            core.build_image_payload, prompt, model, size, negative_prompt, seed)
+            core.build_image_payload, prompt, model, size, seed)
         tid = await anyio.to_thread.run_sync(core.submit_task, payload, "image", prompt)
     except core.WylonError as exc:
         raise _fail(exc)
@@ -207,9 +219,59 @@ async def generate_image(
         exc.task_id = exc.task_id or tid
         raise _fail(exc)
     result.update({"model": result.get("model") or payload["model"],
-                   "size": payload.get("size", "server_default"), "prompt": prompt})
+                   "requested_size": payload.get("size", "server_default"), "prompt": prompt,
+                   **core.estimate_cost(payload)})
     if payload.get("_notes"):
         result["notes"] = payload["_notes"]
+    result.update(_enhance_info(prompt, original_prompt))
+    return _result_content(result, preview)
+
+
+@mcp.tool(structured_output=False, annotations=ToolAnnotations(title="wylon 图像编辑", readOnlyHint=False, destructiveHint=False,
+                                      idempotentHint=False, openWorldHint=True))
+async def edit_image(
+    prompt: Annotated[str, Field(
+        description="编辑要求：先写要保留什么，再写要改什么；多张图时按顺序说明每张图的用途"
+                    "（如“第一张图提供商品，第二张图提供背景”）。")],
+    images: Annotated[List[str], Field(
+        description="要编辑或参考的图片，1~10 张，按顺序。本地绝对路径（PNG/JPEG/WebP/GIF）或公网 HTTPS 链接。",
+        min_length=1, max_length=core.MAX_EDIT_IMAGES)],
+    size: Annotated[Optional[str], Field(
+        description="输出尺寸。默认 auto（按第一张图的宽高比，像素可能小于原图）；用户要高清、2K 时从后面选宽高比最接近的："
+                    " 2048x2048、2752x1536、1536x2752、2400x1792、"
+                    "1792x2400、2528x1696、1696x2528。")] = None,
+    seed: Annotated[Optional[int], Field(description="随机种子，可选，用于复现。", ge=0, le=4294967295)] = None,
+    output_dir: Annotated[Optional[str], Field(
+        description="保存目录的绝对路径，可选。默认 ~/wylon_outputs（或环境变量 WYLON_OUTPUT_DIR）。")] = None,
+    wait_seconds: Annotated[int, Field(description="本次调用最多等待秒数，超时返回 pending 和 task_id。默认 25 秒。",
+                                       ge=0, le=MAX_WAIT)] = 25,
+    preview: Annotated[bool, Field(description="成功时是否附带一张小尺寸预览图。")] = True,
+    original_prompt: Annotated[Optional[str], Field(
+        description="提示词经过扩写时，填用户的原话；按原话提交时不填。")] = None,
+    prompt_choice: Annotated[Optional[PromptChoice], Field(
+        description="仅当用户在本次请求里明确说了“按原话/不要改”（original）或“帮我扩写/润色”（enhanced）时填写，"
+                    "只对本次生效、不保存偏好。")] = None,
+    ctx: Context = None,  # type: ignore[assignment]
+) -> List[Any]:
+    """用 wylon 编辑图片（计费）：换背景、改风格/配色/局部、融合多张图等。结果是一张新图，原图不变，自动下载到本地。
+    只要用户给了图片并要求改图或基于它出图，就用本工具；没有图片时用 generate_image。不支持蒙版和透明背景。
+    如果返回 status=pending，说明已提交成功，用 get_task 和返回的 task_id 继续等待，不要重新调用本工具。
+    如果返回 status=needs_user_choice，说明没有提交、没有扣费，按返回说明先询问用户是否扩写提示词。"""
+    gate = _enhance_gate("edit", prompt, prompt_choice)
+    if gate:
+        return [_text(gate)]
+    try:
+        payload = await anyio.to_thread.run_sync(core.build_edit_payload, prompt, images, size, seed)
+        tid = await anyio.to_thread.run_sync(core.submit_task, payload, "image", prompt)
+    except core.WylonError as exc:
+        raise _fail(exc)
+    try:
+        result = await _wait_for_task(ctx, tid, "image", wait_seconds, output_dir)
+    except core.WylonError as exc:
+        exc.task_id = exc.task_id or tid
+        raise _fail(exc)
+    result.update({"model": result.get("model") or payload["model"], "requested_size": payload["size"],
+                   "prompt": prompt, "source_images": images, **core.estimate_cost(payload)})
     result.update(_enhance_info(prompt, original_prompt))
     return _result_content(result, preview)
 
@@ -225,8 +287,9 @@ async def create_video_task(
                     "MiniMaxAI/MiniMax-H3-Ref2VA：多张参考图/视频/音频，保持人物或商品一致。")]
     = "MiniMaxAI/MiniMax-H3",
     duration: Annotated[int, Field(description="时长 5~15 秒，默认 5 秒（最省钱）。", ge=5, le=15)] = 5,
-    ratio: Annotated[VideoRatio, Field(
-        description="宽高比，默认 16:9。adaptive 只能在 MiniMax-H3 传了首/尾帧时使用（跟随图片比例）。")] = "16:9",
+    ratio: Annotated[Optional[VideoRatio], Field(
+        description="宽高比。用户没指定就不要传：传了首/尾帧时默认 adaptive（跟随图片），否则默认 16:9。"
+                    "adaptive 只能在 MiniMax-H3 传了首/尾帧时使用。")] = None,
     first_frame: Annotated[Optional[str], Field(
         description="首帧图片：本地绝对路径或公网 HTTPS 链接。仅 MiniMax-H3。")] = None,
     last_frame: Annotated[Optional[str], Field(
@@ -234,10 +297,13 @@ async def create_video_task(
     ref_images: Annotated[Optional[List[str]], Field(
         description="参考图列表（最多 9 张），本地绝对路径或公网 HTTPS 链接。仅 Ref2VA。")] = None,
     ref_videos: Annotated[Optional[List[str]], Field(
-        description="参考视频列表（最多 3 个），只支持公网 HTTPS 的 MP4/MOV 链接。仅 Ref2VA。")] = None,
+        description="参考视频列表（最多 3 个），只支持公网 HTTPS 的 MP4/MOV 链接；"
+                    "每段 2~15 秒、合计不超过 15 秒、单段不超过 50MB。仅 Ref2VA。")] = None,
     ref_audios: Annotated[Optional[List[str]], Field(
-        description="参考音频列表（最多 3 段），本地绝对路径或公网 HTTPS 的 WAV/MP3。仅 Ref2VA。")] = None,
-    negative_prompt: Annotated[Optional[str], Field(description="负向提示词，可选。")] = None,
+        description="参考音频列表（最多 3 段），本地绝对路径或公网 HTTPS 的 WAV/MP3；"
+                    "每段 2~15 秒、合计不超过 15 秒、单段不超过 15MB。仅 Ref2VA。")] = None,
+    negative_prompt: Annotated[Optional[str], Field(
+        description="负向提示词，最长 512 token；只有完整版模型支持，蒸馏版不支持。用户明确要求时才用。")] = None,
     seed: Annotated[Optional[int], Field(description="随机种子，可选。", ge=0)] = None,
     original_prompt: Annotated[Optional[str], Field(
         description="提示词经过扩写时，填用户的原话；按原话提交时不填。")] = None,
@@ -261,7 +327,8 @@ async def create_video_task(
         raise _fail(exc)
     return {
         "status": "submitted", "kind": "video", "task_id": tid, "model": model,
-        "duration": duration, "ratio": ratio,
+        "duration": duration, "ratio": payload.get("ratio", "adaptive"), **core.estimate_cost(payload),
+        "result_retention": core.RETENTION_NOTE,
         "next_step": "调用 get_task(task_id) 等待并下载结果；一般需要 1~5 分钟，可多次调用。",
         "prompt": prompt,
         **_enhance_info(prompt, original_prompt),
@@ -289,7 +356,7 @@ def set_prompt_enhance(
 @mcp.tool(structured_output=False, annotations=ToolAnnotations(title="wylon 查询/找回任务", readOnlyHint=False, destructiveHint=False,
                                       idempotentHint=True, openWorldHint=True))
 async def get_task(
-    task_id: Annotated[str, Field(description="generate_image 或 create_video_task 返回的 task_id。")],
+    task_id: Annotated[str, Field(description="generate_image、edit_image 或 create_video_task 返回的 task_id。")],
     wait_seconds: Annotated[int, Field(
         description="本次最多等待秒数，0 表示只查一次。未完成会返回 pending，可再次调用。默认 25 秒。", ge=0, le=MAX_WAIT)] = 25,
     output_dir: Annotated[Optional[str], Field(description="保存目录的绝对路径，可选，默认 ~/wylon_outputs。")] = None,
@@ -310,7 +377,8 @@ async def get_task(
 async def cancel_task(
     task_id: Annotated[str, Field(description="要取消的 task_id。")],
 ) -> Dict[str, Any]:
-    """取消一个还在排队的 wylon 任务。只在用户明确要求取消时调用。"""
+    """取消一个还在排队的 wylon 任务（记录会一并删除，不可恢复）。只在用户明确要求取消时调用。
+    运行中的任务不能取消；已结束的任务不会被改动，返回 status=not_cancelled。"""
     try:
         return await anyio.to_thread.run_sync(core.cancel_task, task_id)
     except core.WylonError as exc:
@@ -334,7 +402,7 @@ USAGE = f"""wylon-mcp {__version__}
 用法:
   wylon-mcp            启动 MCP 服务器（stdio），供 AI 客户端调用
   wylon-mcp setup      在本机保存 wylon API Key（输入不显示，存到 ~/.wylon/config.json）
-  wylon-mcp check      检查 API Key 是否已配置
+  wylon-mcp check      检查 API Key 是否可用，以及能用哪些生图、生视频模型（不计费）
 """
 
 
@@ -360,12 +428,22 @@ def _check() -> int:
         print(f"未配置 API Key。运行 `wylon-mcp setup`，或在 MCP 配置里设置 WYLON_API_KEY。")
         return 1
     print(f"已配置: {core.mask_key(key)}（来源 {source}），API: {base_url}")
+    live = core.live_models()
+    if live is None:
+        print("未能连接 wylon 读取模型列表，请检查网络和 Key 是否有效。")
+        return 1
+    media = [m for m, t in live.items() if t in ("image", "video")]
+    if not media:
+        print(KEY_TYPE_NOTE)
+        return 1
+    print("可用的生图、生视频模型: " + "、".join(media))
     return 0
 
 
 def main() -> int:
     args = sys.argv[1:]
     if not args:
+        threading.Thread(target=core.list_prices, daemon=True).start()  # warm the price cache
         mcp.run("stdio")
         return 0
     cmd = args[0]

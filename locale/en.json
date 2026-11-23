@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Wylon image and video",
-    "description": "Generate images and videos with wylon.cn. Requires uv and a wylon API key; generation is billed to your wylon account."
+    "title": "Image and video generation",
+    "description": "Create high-resolution images and short videos with sound from a single sentence. Supports text-to-image, image editing, text-to-video, first/last-frame image-to-video, and multi-reference video for posters, product images, creative shorts, and more. Results are saved locally. First use requires a wylon API key (get one at https://dashboard.wylon.cn); usage is billed to your wylon account."
   }
 }

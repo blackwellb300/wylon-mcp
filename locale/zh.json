@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "wylon 生图生视频",
-    "description": "用 wylon.cn 生成图片和视频。需要先安装 uv 并配置 wylon API Key，生成费用按你的 wylon 账户计费。"
+    "title": "图像与视频生成",
+    "description": "用一句话生成高清图片和有声短视频。支持文生图、图像编辑、文生视频、首尾帧图生视频和多参考生视频，可用于海报、商品图、创意短片等场景，结果自动保存到本地。首次使用需配置 wylon 新云 API Key（在 https://dashboard.wylon.cn 获取），生成费用按实际用量从你的 wylon 账户扣除。"
   }
 }
