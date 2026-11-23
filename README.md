@@ -6,6 +6,8 @@ wylon（https://wylon.cn）生图、生视频的 MCP 服务器。装好以后，
 - 生视频：MiniMax-H3（文生视频、首帧/首尾帧图生视频，带原生音效），MiniMax-H3-Ref2VA（多图/视频/音频参考，保持人物或商品一致）
 - 生成费用由 wylon 按你的账户计费
 
+> **目前还没有发布到 PyPI**。下文所有 `uvx wylon-mcp` 请先换成 `uvx --from git+https://github.com/blackwellb300/wylon-mcp wylon-mcp`；JSON 配置里的 `"args"` 换成 `["--from", "git+https://github.com/blackwellb300/wylon-mcp", "wylon-mcp"]`。需要先安装 Git。
+
 ## 一、准备
 
 1. 在 https://dashboard.wylon.cn 创建一个 API Key。
@@ -52,7 +54,7 @@ uvx wylon-mcp setup
 
 ### DeepSeek Harness：作为插件安装
 
-打开 **Plugins（插件）→ Add plugin（添加插件）**，填入本仓库的 Git 地址，或本文件夹的完整路径。需要先安装 uv 和 Git（填文件夹路径时不需要 Git）。API Key 用方式 A 配置。
+打开 **Plugins（插件）→ Add plugin（添加插件）**，填入 `https://github.com/blackwellb300/wylon-mcp.git`，或本文件夹的完整路径。需要先安装 uv 和 Git（填文件夹路径时不需要 Git）。API Key 用方式 A 配置。
 
 如果以前在 `cordis.patch.yml` 里手动添加过 `serverName: wylon`，请先删掉那一段，否则两者重名，后加载的会失败。
 
